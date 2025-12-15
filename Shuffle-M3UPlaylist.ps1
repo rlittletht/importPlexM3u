@@ -46,7 +46,16 @@ param(
     [string] $OutputM3U,
 
     [Parameter(Mandatory = $false)]
+    [string[]] $GrepGroup,
+
+    [Parameter(Mandatory = $false)]
+    [string[]] $DebugParts,
+
+    [Parameter(Mandatory = $false)]
     [int] $MinimumDistance = 5,
+
+    [Parameter(Mandatory = $false)]
+    [int] $ShowGroupCount = 20,
 
     [Parameter(Mandatory = $false)]
     [int] $Seed
@@ -90,6 +99,33 @@ function Read-M3UFile
     return $tracks
 }
 
+function NormalizePart
+{
+    param([string] $Part)
+    
+    # Remove trailing artist info after delimiters like "by", "ft.", "feat."
+    $Part = $Part -replace '\s+by\s+.*$', ''
+    $Part = $Part -replace '\s+ft[\.\s]+.*$', ''
+    $Part = $Part -replace '\s+feat[\.\s]+.*$', ''
+    
+    # - Parenthetical info (e.g., "(Live)", "(Remix)", "(Remastered)")
+    $Part = $Part -replace '\s*\([^\)]*\)\s*', ''
+    $Part = $Part -replace '\s*\[[^\]]*\]\s*', ''
+
+    # - leading track numbers
+    $Part = $Part -replace ' +\d+[\s\.\-]+', ''
+    $Part = $Part -replace ' +\(\d+\) *', ''
+
+    # - Special characters and extra whitespace
+    $Part = $Part -replace '[_\-:]+', ' '
+    $Part = $Part -replace '\s+', ' '
+    $Part = $Part.Trim()
+    
+    # Convert to lowercase for case-insensitive comparison
+    return $Part.ToLower()
+}
+
+
 function Get-PathContext
 {
     param([string] $FilePath)
@@ -120,19 +156,84 @@ function Get-PathContext
         $context.Keywords += $secondLastDir
     }
     
-    # Also add parent directory if it looks relevant
-    if ($pathParts.Count -ge 3)
-    {
-        $context.Keywords += $pathParts[-3]
-    }
-    
     return $context
+}
+
+function partMatchesSongPattern
+{
+    param([string] $part)
+
+    # Common song starting words that indicate it's likely a song title
+    $matchValues = '^(if|my|let''s|the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa|christmas|feliz|merry|las)\s+'
+
+    if ($part -match $matchValues)
+    {
+        return $true
+    }
+    return $false
+}
+
+function shouldChoosePart
+{
+    param([string] $part, [string] $partOther)
+
+    if (partMatchesSongPattern $part)
+    {
+        return $true
+    }
+
+    # if we are longer than the other part, AND the other part is not a common song starting word, prefer this part
+    if ($part.Length -gt $partOther.Length -and -not (partMatchesSongPattern $partOther))
+    {
+        return $true
+    }
+    return $false
+}
+
+function chooseWinnerFromTwoParts
+{
+    param([string] $firstPart, [string] $lastPart, [bool] $debugThis)
+
+    if (shouldChoosePart $firstPart $lastPart)
+    {
+        if ($debugThis)
+        {
+            Write-Host "      Choosing between parts $($firstPart)/$($lastPart): chose $($firstPart)"
+        }
+        return $firstPart
+    }
+    elseif (shouldChoosePart $lastPart $firstPart)
+    {
+        if ($debugThis)
+        {
+            Write-Host "      Choosing between parts $($firstPart)/$($lastPart): chose $($lastPart)"
+        }
+        return $lastPart
+    }
+    # Default: prefer last part (most common pattern: "Artist - Song")
+    else
+    {
+        if ($debugThis)
+        {
+            Write-Host "      Choosing between parts $($firstPart)/$($lastPart): chose by default $($lastPart)"
+        }
+        return $lastPart
+    }
 }
 
 function Get-NormalizedSongTitle
 {
-    param([string] $FilePath)
-    
+    param([string] $FilePath,
+        [hashtable] $groups,
+        [string[]] $DebugParts)
+
+    $debugThis = $false
+
+    if ($DebugParts -and ($DebugParts | Where-Object { $FilePath -match $_ }))
+    {
+        $debugThis = $true;
+    }
+
     # Extract filename without extension
     $filename = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
     
@@ -142,6 +243,11 @@ function Get-NormalizedSongTitle
     # Remove common patterns:
     # - Track numbers (e.g., "01 - ", "01. ", "01-", "1. ", "01 ")
     $normalized = $filename -replace '^\d+[\s\.\-]+', ''
+    $normalized = $normalized -replace '^\(\d+\) *', ''
+
+    # get rid of multiple spaces and collapse into 1 space
+    $normalized = $normalized -replace '  +', ''
+
     $normalized = $normalized -replace '^\d+$', ''  # Just a number with nothing after
     
     # Remove disc/CD numbers (e.g., "Disc 1 - ", "CD2-", "(Disc 1)")
@@ -152,6 +258,11 @@ function Get-NormalizedSongTitle
     # Split by " - " and try to identify which part is the song title
     $parts = $normalized -split '\s+-\s+'
     
+    if ($debugThis)
+    {
+        Write-Host "here! filepath: $($FilePath), filename: $($filename), normalized so far: $($normalized), Parts: '$($parts -join ', ')'"
+    }
+
     if ($parts.Count -gt 1)
     {
         # Common patterns:
@@ -168,47 +279,87 @@ function Get-NormalizedSongTitle
         for ($i = 0; $i -lt $parts.Count; $i++)
         {
             $part = $parts[$i].Trim()
+            if ($debugThis)
+            {
+                Write-Host "      Processing part: $($part)"
+            }
+            $part = $part -replace '^\d+ *', ''
+
             $isContext = $false
+            
+            if ($debugThis)
+            {
+                Write-Host "      Processing part: $($part)"
+            }
             
             # Skip empty parts
             if ([string]::IsNullOrWhiteSpace($part))
             {
+                if ($debugThis)
+                {
+                    Write-Host "      Skipping empty part: $($part)"
+                }
                 continue
             }
             
             # Skip parts that are just numbers (track numbers, years, etc.)
             if ($part -match '^\d+$')
             {
+                if ($debugThis)
+                {
+                    Write-Host "      Skipping numeric part: $($part)"
+                }
                 continue
             }
             
             # Skip very short parts (likely not song titles)
             if ($part.Length -lt 2)
             {
+                if ($debugThis)
+                {
+                    Write-Host "      Skipping short part: $($part)"
+                }
                 continue
             }
             
             # Skip parts that look like album disc references
             if ($part -match '(?i)(disc|cd)\s*\d+')
             {
+                if ($debugThis)
+                {
+                    Write-Host "      Skipping disc reference part: $($part)"
+                }
                 continue
             }
-            
-            # Check if this part matches path context
-            foreach ($keyword in $pathContext.Keywords)
+  
+            # don't skip parts that strongly match a song pattern
+            if (-not (partMatchesSongPattern $part))
             {
-                if (![string]::IsNullOrWhiteSpace($keyword))
+                if ($debugThis)
                 {
-                    # Check if this part matches the path context (case-insensitive, allowing for variations)
-                    # Match if the part contains the keyword or vice versa
-                    if ($part -match "(?i)$([regex]::Escape($keyword))" -or $keyword -match "(?i)$([regex]::Escape($part))")
+                    Write-Host "      Checking context for part: $($part)"
+                }
+
+                # Check if this part matches path context
+                foreach ($keyword in $pathContext.Keywords)
+                {
+                    if (![string]::IsNullOrWhiteSpace($keyword))
                     {
-                        $isContext = $true
-                        break
+                        # Check if this part matches the path context (case-insensitive, allowing for variations)
+                        # Match if the part contains the keyword or vice versa
+                        if ($part -match "(?i)$([regex]::Escape($keyword))" -or $keyword -match "(?i)$([regex]::Escape($part))")
+                        {
+                            if ($debugThis)
+                            {
+                                Write-Host "      Skipping context part: $($part) (matches keyword: $($keyword))"
+                            }
+                        
+                            $isContext = $true
+                            break
+                        }
                     }
                 }
-            }
-            
+            }        
             if (-not $isContext)
             {
                 $candidateParts += $part
@@ -226,79 +377,134 @@ function Get-NormalizedSongTitle
         {
             if ($candidateParts.Count -eq 1)
             {
+                if ($debugThis)
+                {
+                    Write-Host "      Chose the only part: $($candidateParts[0])"
+                }
                 $normalized = $candidateParts[0]
-            }
-            elseif ($candidateParts.Count -eq 2)
-            {
-                # With 2 candidates, use heuristics:
-                # - Prefer the part that looks more like a song title
-                # - Song titles often have: "The", "A", "An", common words, are longer
-                # - Artist names often have: proper capitalization, shorter, person names
-                $firstPart = $candidateParts[0]
-                $lastPart = $candidateParts[1]
-                
-                # Heuristic: If first part starts with common song title words, prefer it
-                if ($firstPart -match '^(the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa)\s+')
-                {
-                    $normalized = $firstPart
-                }
-                # Heuristic: If last part starts with common song title words, prefer it  
-                elseif ($lastPart -match '^(the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa|run|walking)\s+')
-                {
-                    $normalized = $lastPart
-                }
-                # Default: prefer last part (most common pattern: "Artist - Song")
-                else
-                {
-                    $normalized = $lastPart
-                }
             }
             else
             {
-                # With 3+ candidates, prefer the middle one (typically the song title)
-                $middleIndex = [Math]::Floor(($candidateParts.Count - 1) / 2.0)
-                if ($middleIndex -ge $candidateParts.Count)
+                $partIndex = 0
+                $lastPartMatched = -1
+                $lastPartWeight = -1
+
+                while ($partIndex -lt $candidateParts.Count)
                 {
-                    $middleIndex = $candidateParts.Count - 1
+                    $part = $candidateParts[$partIndex]
+                    $normalizedPart = NormalizePart($part)
+                    if ($groups.ContainsKey($normalizedPart))
+                    {
+                        $weight = $groups[$normalizedPart].Count
+                        if ($weight -gt $lastPartWeight)
+                        {
+                            $lastPartWeight = $weight
+                            $lastPartMatched = $partIndex
+                        }
+                    }
+
+                    $partIndex++
                 }
-                $normalized = $candidateParts[$middleIndex]
+                if ($lastPartMatched -ne -1)
+                {
+                    $normalized = $candidateParts[$lastPartMatched]
+                    if ($debugThis)
+                    {
+                        Write-Host "      Chose known part from groups: $($normalized) with weight $($lastPartWeight)"
+                    }
+                    return $normalized
+                }
+
+                # No known song matched, use heuristics below
+                if ($candidateParts.Count -eq 2)
+                {
+                    # With 2 candidates, use heuristics:
+                    # - Prefer the part that looks more like a song title
+                    # - Song titles often have: "The", "A", "An", common words, are longer
+                    # - Artist names often have: proper capitalization, shorter, person names
+                    $normalized = chooseWinnerFromTwoParts $candidateParts[0] $candidateParts[1] $debugThis
+                }
+                else
+                {
+                    # binary search for a winner
+
+                    $index = 0
+                    $length = 1
+
+                    # while we have pairs to compare
+                    while ($index + $length -lt $candidateParts.Count)
+                    {
+                        while ($index -lt $candidateParts.Count - $length)
+                        {
+                            # if we don't have one to compare with, then we win by default (which means we don't change)
+                            if ($index + $length -lt $candidateParts.Count)
+                            {
+                                $candidateParts[$index] = chooseWinnerFromTwoParts $candidateParts[$index] $candidateParts[$index + $length] $debugThis
+                            }
+                            $index += $length
+                        }
+                        $length *= 2
+                    }
+
+                    # after reducing, our answer is in candidateParts[0]
+                    $normalized = $candidateParts[0]
+
+                    if ($debugThis)
+                    {
+                        Write-Host "      Chose winner in multi-candidate: $($normalized). CandidateParts: '$($candidateParts -join ', ')', chose: $($normalized)"
+                    }
+                }
             }
         }
         else
         {
             # No non-context parts found, use the last part
+            if ($debugThis)
+            {
+                Write-Host "      No non-context parts found, using whole parts: $($parts[-1])"
+            }
+            
             $normalized = $parts[-1]
         }
     }
-    
-    # Remove trailing artist info after delimiters like "by", "ft.", "feat."
-    $normalized = $normalized -replace '\s+by\s+.*$', ''
-    $normalized = $normalized -replace '\s+ft[\.\s]+.*$', ''
-    $normalized = $normalized -replace '\s+feat[\.\s]+.*$', ''
-    
-    # - Parenthetical info (e.g., "(Live)", "(Remix)", "(Remastered)")
-    $normalized = $normalized -replace '\s*\([^\)]*\)\s*', ''
-    $normalized = $normalized -replace '\s*\[[^\]]*\]\s*', ''
-    
-    # - Special characters and extra whitespace
-    $normalized = $normalized -replace '[_\-:]+', ' '
-    $normalized = $normalized -replace '\s+', ' '
-    $normalized = $normalized.Trim()
-    
-    # Convert to lowercase for case-insensitive comparison
-    return $normalized.ToLower()
+    if ($debugThis)
+    {
+        Write-Host "       Final result!  CandidateParts: '$($candidateParts -join ', ')', chose: $($normalized)"
+    }
+    return NormalizePart($normalized)
 }
 
 function Group-TracksBySimilarity
 {
-    param([string[]] $Tracks)
+    param([string[]] $Tracks, [string[]] $GrepGroup, [string[]] $DebugParts, [int] $ShowGroupCount)
     
+    # first pass just collects groups for the next pass
+    $groupsPass1 = @{}
     $groups = @{}
     $trackInfo = @()
     
+    # first pass just collects groups for the next pass
+    
+    Write-Host "`nBuilding similarity groups..." -ForegroundColor Cyan
+
     foreach ($track in $Tracks)
     {
-        $normalized = Get-NormalizedSongTitle $track
+        # yes, pass in groups here -- we always want the empty hash table
+        $normalized = Get-NormalizedSongTitle $track $groups $DebugParts
+        
+        if (!$groupsPass1.ContainsKey($normalized))
+        {
+            $groupsPass1[$normalized] = @()
+        }
+        $groupsPass1[$normalized] += $track
+    }
+
+    # second pass builds the actual track info
+    Write-Host "`nBuilding track info with gathered group information..." -ForegroundColor Cyan
+
+    foreach ($track in $Tracks)
+    {
+        $normalized = Get-NormalizedSongTitle $track $groupsPass1 $DebugParts
         
         if (!$groups.ContainsKey($normalized))
         {
@@ -312,15 +518,23 @@ function Group-TracksBySimilarity
         }
     }
     
+    
+    #return;
+
     # Report duplicates/variants
     $variantGroups = $groups.GetEnumerator() | Where-Object { $_.Value.Count -gt 1 } | Sort-Object { $_.Value.Count } -Descending
     
     if ($variantGroups)
     {
         Write-Host "`nFound $($variantGroups.Count) songs with multiple versions:" -ForegroundColor Yellow
-        $displayCount = [Math]::Min(500, $variantGroups.Count)
+        $displayCount = [Math]::Min($ShowGroupCount, $variantGroups.Count)
         foreach ($group in ($variantGroups | Select-Object -First $displayCount))
         {
+            if ($GrepGroup -and ($group.Key -notin $GrepGroup))
+            {
+                continue
+            }
+
             Write-Host "  '$($group.Key)' - $($group.Value.Count) versions" -ForegroundColor DarkYellow
             # Show a few examples of the actual filenames for the top groups
             if ($group.Value.Count -gt 1)
@@ -516,7 +730,7 @@ if ([string]::IsNullOrWhiteSpace($OutputM3U))
 $tracks = Read-M3UFile -Path $InputM3U
 
 # Group tracks by similarity
-$trackInfo = Group-TracksBySimilarity -Tracks $tracks
+$trackInfo = Group-TracksBySimilarity -Tracks $tracks -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount
 
 # Perform smart shuffle
 $shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance
