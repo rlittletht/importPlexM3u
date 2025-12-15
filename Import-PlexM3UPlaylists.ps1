@@ -135,15 +135,19 @@ function Build-FilePathToRatingKeyMap
         if (![string]::IsNullOrWhiteSpace($MediaContainerFile) -and (Test-Path -LiteralPath $MediaContainerFile))
         {
             Write-Host "Loading MediaContainer from file: $MediaContainerFile" -ForegroundColor Yellow
-            [xml]$resp = Get-Content -LiteralPath $MediaContainerFile -Raw
+            $jsonContent = Get-Content -LiteralPath $MediaContainerFile -Raw
+            # Use Invoke-RestMethod's XML parsing to convert to PSCustomObject like the live API does
+            $resp = ConvertFrom-Json $jsonContent
+            $mc = $resp.MediaContainer
+            Write-Host "Loaded MediaContainer from File: $mc"
         }
         else
         {
             $q = "/library/sections/$SectionId/all?type=10&X-Plex-Container-Start=$start&X-Plex-Container-Size=$LibraryPageSize"
             $resp = Invoke-Plex GET $q
+            $mc = $resp.MediaContainer
+            Write-Host "Loaded MediaContainer from Plex: $mc"
         }
-
-        $mc = $resp.MediaContainer
         if ($null -eq $total)
         {
             $total = [int]$mc.totalSize
