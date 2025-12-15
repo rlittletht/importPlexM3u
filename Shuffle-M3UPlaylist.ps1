@@ -85,19 +85,143 @@ function Read-M3UFile {
     return $tracks
 }
 
+function Get-PathContext {
+    param([string] $FilePath)
+    
+    # Extract potential artist and album names from the directory structure
+    # Common patterns: ...\Artist\Album\Song.mp3 or ...\Album\Song.mp3
+    $directory = [System.IO.Path]::GetDirectoryName($FilePath)
+    $pathParts = $directory -split '[/\\]'
+    
+    # Get the last 2-3 directory levels (might contain artist, album, compilation info)
+    $context = @{
+        Artist = $null
+        Album = $null
+        Keywords = @()
+    }
+    
+    if ($pathParts.Count -ge 1) {
+        $lastDir = $pathParts[-1]
+        $context.Album = $lastDir
+        $context.Keywords += $lastDir
+    }
+    
+    if ($pathParts.Count -ge 2) {
+        $secondLastDir = $pathParts[-2]
+        $context.Artist = $secondLastDir
+        $context.Keywords += $secondLastDir
+    }
+    
+    # Also add parent directory if it looks relevant
+    if ($pathParts.Count -ge 3) {
+        $context.Keywords += $pathParts[-3]
+    }
+    
+    return $context
+}
+
 function Get-NormalizedSongTitle {
     param([string] $FilePath)
     
     # Extract filename without extension
     $filename = [System.IO.Path]::GetFileNameWithoutExtension($FilePath)
     
-    # Remove common patterns:
-    # - Track numbers (e.g., "01 - ", "01. ", "01-", "1. ")
-    $normalized = $filename -replace '^\d+[\s\.\-]+', ''
+    # Get context from path (artist/album names)
+    $pathContext = Get-PathContext $FilePath
     
-    # - Artist delimiter patterns (e.g., " - ", " by ", " ft. ", " feat. ")
-    # Keep only the song title (typically before the first delimiter)
-    $normalized = $normalized -replace '\s+-\s+.*$', ''
+    # Remove common patterns:
+    # - Track numbers (e.g., "01 - ", "01. ", "01-", "1. ", "01 ")
+    $normalized = $filename -replace '^\d+[\s\.\-]+', ''
+    $normalized = $normalized -replace '^\d+$', ''  # Just a number with nothing after
+    
+    # Remove disc/CD numbers (e.g., "Disc 1 - ", "CD2-", "(Disc 1)")
+    $normalized = $normalized -replace '^(Disc|CD)\s*\d+[\s\.\-]+', ''
+    $normalized = $normalized -replace '\(Disc\s*\d+\)', ''
+    
+    # Parse multi-part filenames (e.g., "Artist - Album - Track - Song Title - Extra Info")
+    # Split by " - " and try to identify which part is the song title
+    $parts = $normalized -split '\s+-\s+'
+    
+    if ($parts.Count -gt 1) {
+        # Common patterns:
+        # - "Artist - Song" -> use last part
+        # - "Artist - Album - Song" -> use last part  
+        # - "Artist - Album - TrackNum - Song" -> use last part (tracknum already removed)
+        # - "Album (Disc X) - TrackNum - Song - Artist" -> prefer middle parts
+        # - "Album - Song - Artist" -> use middle part
+        
+        # Filter out parts that match path context (artist/album)
+        $candidateParts = @()
+        $candidateIndices = @()
+        
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $part = $parts[$i].Trim()
+            $isContext = $false
+            
+            # Skip empty parts
+            if ([string]::IsNullOrWhiteSpace($part)) {
+                continue
+            }
+            
+            # Skip parts that are just numbers (track numbers, years, etc.)
+            if ($part -match '^\d+$') {
+                continue
+            }
+            
+            # Skip very short parts (likely not song titles)
+            if ($part.Length -lt 2) {
+                continue
+            }
+            
+            # Skip parts that look like album disc references
+            if ($part -match '(?i)(disc|cd)\s*\d+') {
+                continue
+            }
+            
+            # Check if this part matches path context
+            foreach ($keyword in $pathContext.Keywords) {
+                if (![string]::IsNullOrWhiteSpace($keyword)) {
+                    # Check if this part matches the path context (case-insensitive, allowing for variations)
+                    # Match if the part contains the keyword or vice versa
+                    if ($part -match "(?i)$([regex]::Escape($keyword))" -or $keyword -match "(?i)$([regex]::Escape($part))") {
+                        $isContext = $true
+                        break
+                    }
+                }
+            }
+            
+            if (-not $isContext) {
+                $candidateParts += $part
+                $candidateIndices += $i
+            }
+        }
+        
+        # Choose the best candidate:
+        # 1. If we have candidates, prefer one in the middle (likely song title)
+        # 2. Otherwise use the last non-context part
+        if ($candidateParts.Count -gt 0) {
+            # If there are multiple candidates, prefer the one closest to the middle
+            # but not the last one (which is often artist name)
+            if ($candidateParts.Count -eq 1) {
+                $normalized = $candidateParts[0]
+            } elseif ($candidateParts.Count -eq 2) {
+                # With 2 candidates, prefer the first (song over artist)
+                $normalized = $candidateParts[0]
+            } else {
+                # With 3+ candidates, take the middle one or second one
+                $middleIndex = [Math]::Floor($candidateParts.Count / 2)
+                if ($middleIndex -gt 0) {
+                    $middleIndex = 1
+                }
+                $normalized = $candidateParts[$middleIndex]
+            }
+        } else {
+            # No non-context parts found, use the last part
+            $normalized = $parts[-1]
+        }
+    }
+    
+    # Remove trailing artist info after delimiters like "by", "ft.", "feat."
     $normalized = $normalized -replace '\s+by\s+.*$', ''
     $normalized = $normalized -replace '\s+ft[\.\s]+.*$', ''
     $normalized = $normalized -replace '\s+feat[\.\s]+.*$', ''
@@ -107,7 +231,7 @@ function Get-NormalizedSongTitle {
     $normalized = $normalized -replace '\s*\[[^\]]*\]\s*', ''
     
     # - Special characters and extra whitespace
-    $normalized = $normalized -replace '[_\-]+', ' '
+    $normalized = $normalized -replace '[_\-:]+', ' '
     $normalized = $normalized -replace '\s+', ' '
     $normalized = $normalized.Trim()
     
@@ -143,6 +267,14 @@ function Group-TracksBySimilarity {
         $displayCount = [Math]::Min(10, $variantGroups.Count)
         foreach ($group in ($variantGroups | Select-Object -First $displayCount)) {
             Write-Host "  '$($group.Key)' - $($group.Value.Count) versions" -ForegroundColor DarkYellow
+            # Show a few examples of the actual filenames for the top groups
+            if ($group.Value.Count -gt 5) {
+                $exampleCount = [Math]::Min(3, $group.Value.Count)
+                for ($i = 0; $i -lt $exampleCount; $i++) {
+                    $exampleFile = [System.IO.Path]::GetFileName($group.Value[$i])
+                    Write-Host "    e.g.: $exampleFile" -ForegroundColor DarkGray
+                }
+            }
         }
         if ($variantGroups.Count -gt 10) {
             Write-Host "  ... and $($variantGroups.Count - 10) more" -ForegroundColor DarkGray
