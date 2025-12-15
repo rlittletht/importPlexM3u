@@ -7,11 +7,16 @@ Requires:
 - X-Plex-Token
 - machineIdentifier
 - music library section id (your "key" = 6)
+
+To get the token, using plex web, get info for an item then click on the XML link to open the XML info in a new tab. Copy the token from the end of the URL
+To get the plex base URL, do that same as above, but get to root server address after https
+To get the machine identifier, run curl https://<base-url>/identity?X-Plex-Token=<token>
+To get the section id, run https://<base-url>/library/sections?X-Plex-Token=<token>
 #>
 
 param(
     [Parameter(Mandatory=$true)]
-    [string] $PlexBaseUrl,            # e.g. https://192-168-1-45....plex.direct:32400
+    [string] $PlexBaseUrl,            # e.g. https://<plex>.plex.direct:32400
 
     [Parameter(Mandatory=$true)]
     [string] $PlexToken,
@@ -25,54 +30,45 @@ param(
     [Parameter(Mandatory=$true)]
     [string[]] $M3UPaths,             # one or more .m3u files
 
-    [int] $PageSize = 5000,           # bump if you have huge libraries
-    [switch] $SkipCertificateCheck    # only if TLS validation fails for you
+    [int] $LibraryPageSize = 5000,    # paging size when enumerating tracks
+    [int] $ChunkSize = 200,           # playlist append chunk size (tune as desired)
+    [switch] $SkipCertificateCheck
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function UrlEncode([string] $s) {
-    return [System.Net.WebUtility]::UrlEncode($s)
-}
+function UrlEncode([string] $s) { [System.Net.WebUtility]::UrlEncode($s) }
 
 function New-PlexHeaders {
-    $h = @{
+    @{
         'Accept' = 'application/json'
         'X-Plex-Token' = $PlexToken
     }
-    return $h
 }
 
-function Invoke-PlexJsonGet([string] $pathAndQuery) {
-    $uri = "$PlexBaseUrl$pathAndQuery"
+function Invoke-Plex([ValidateSet('GET','POST','PUT')] [string] $Method, [string] $PathAndQuery) {
+    $uri = ($PlexBaseUrl.TrimEnd('/') + $PathAndQuery)
     $headers = New-PlexHeaders
-    Write-Host "GET $uri"
 
-    if ($SkipCertificateCheck) {
-        return Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -SkipCertificateCheck
+    try {
+        if ($SkipCertificateCheck) {
+            return Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers -SkipCertificateCheck
+        }
+        return Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers
     }
-    return Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
-}
-
-function Invoke-PlexJsonPost([string] $pathAndQuery) {
-    $uri = "$PlexBaseUrl$pathAndQuery"
-    $headers = New-PlexHeaders
-    Write-Host "POST $uri"
-
-    if ($SkipCertificateCheck) {
-        return Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -SkipCertificateCheck
+    catch {
+        # Give helpful diagnostics on HTTP failures
+        $ex = $_.Exception
+        if ($ex.Response -and $ex.Response.StatusCode) {
+            $status = [int]$ex.Response.StatusCode
+            $desc = $ex.Response.StatusDescription
+            Write-Error "HTTP $status $desc calling: $Method $uri"
+        } else {
+            Write-Error "Error calling: $Method $uri :: $($_.Exception.Message)"
+        }
+        throw
     }
-    return Invoke-RestMethod -Method Post -Uri $uri -Headers $headers
-}
-
-function Invoke-PlexJsonPut([string] $pathAndQuery) {
-    $uri = "$PlexBaseUrl$pathAndQuery"
-    $headers = New-PlexHeaders
-    if ($SkipCertificateCheck) {
-        return Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -SkipCertificateCheck
-    }
-    return Invoke-RestMethod -Method Put -Uri $uri -Headers $headers
 }
 
 function Read-M3UTracks([string] $m3uPath) {
@@ -80,13 +76,14 @@ function Read-M3UTracks([string] $m3uPath) {
         throw "M3U not found: $m3uPath"
     }
 
+    # Most .m3u are UTF-8; if yours isn't, fix it upstream.
     $lines = Get-Content -LiteralPath $m3uPath -Encoding UTF8
 
     $tracks = @()
     foreach ($line in $lines) {
         $t = $line.Trim()
         if ($t.Length -eq 0) { continue }
-        if ($t.StartsWith('#')) { continue }  # comments / #EXTM3U / #EXTINF
+        if ($t.StartsWith('#')) { continue }
         $tracks += $t
     }
 
@@ -98,43 +95,37 @@ function Read-M3UTracks([string] $m3uPath) {
 }
 
 function Build-FilePathToRatingKeyMap {
-    Write-Host "Building Plex track map from section $SectionId ..." -ForegroundColor Cyan
+    Write-Host "Building Plex file->ratingKey map from section $SectionId ..." -ForegroundColor Cyan
 
-    # /library/sections/{id}/all?type=10 lists tracks in a music library section (type=10 = Track).
-    # We'll page using X-Plex-Container-Start / X-Plex-Container-Size.
     $map = @{}
     $start = 0
     $total = $null
 
     while ($true) {
-        $q = "/library/sections/$SectionId/all?type=10&X-Plex-Container-Start=$start&X-Plex-Container-Size=$PageSize"
-        $resp = Invoke-PlexJsonGet $q
+        # type=10 => Track
+        $q = "/library/sections/$SectionId/all?type=10&X-Plex-Container-Start=$start&X-Plex-Container-Size=$LibraryPageSize"
+        $resp = Invoke-Plex GET $q
 
         $mc = $resp.MediaContainer
         if ($null -eq $total) {
             $total = [int]$mc.totalSize
-            Write-Host "Total tracks reported by Plex: $total" -ForegroundColor DarkCyan
+            Write-Host "Plex reports $total tracks in section." -ForegroundColor DarkCyan
         }
 
         $items = @()
         if ($mc.Metadata) { $items = $mc.Metadata }
 
         foreach ($it in $items) {
-            # ratingKey identifies the track in Plex
             $rk = $it.ratingKey
             if ($null -eq $rk) { continue }
 
-            # Track has Media[] -> Part[] -> file
             if ($it.Media) {
                 foreach ($m in $it.Media) {
                     if ($m.Part) {
                         foreach ($p in $m.Part) {
                             $file = $p.file
-                            if (![string]::IsNullOrWhiteSpace($file)) {
-                                # Keep first seen mapping; duplicates are rare but can happen with multi-part items.
-                                if (-not $map.ContainsKey($file)) {
-                                    $map[$file] = [string]$rk
-                                }
+                            if (![string]::IsNullOrWhiteSpace($file) -and -not $map.ContainsKey($file)) {
+                                $map[$file] = [string]$rk
                             }
                         }
                     }
@@ -142,36 +133,35 @@ function Build-FilePathToRatingKeyMap {
             }
         }
 
-        $start += $PageSize
+        $start += $LibraryPageSize
         Write-Host ("Mapped {0} files so far..." -f $map.Count) -ForegroundColor DarkGray
 
         if ($start -ge $total) { break }
-        if ($items.Count -eq 0) { break } # safety
+        if ($items.Count -eq 0) { break }
     }
 
     if ($map.Count -eq 0) {
-        throw "Failed to build any file->ratingKey mappings. Are there tracks in section $SectionId?"
+        throw "No mappings created. Are there tracks in section $SectionId?"
     }
 
     return $map
 }
 
-function Ensure-PlaylistFromRatingKeys([string] $title, [string[]] $ratingKeys) {
-    if ($ratingKeys.Count -lt 1) {
-        throw "Cannot create playlist '$title' with zero items (Plex returns 400)."
+function Get-UriForRatingKeys([string[]] $ratingKeys) {
+    $rkList = ($ratingKeys -join ",")
+    "server://$MachineIdentifier/com.plexapp.plugins.library/library/metadata/$rkList"
+}
+
+function New-PlexPlaylistWithFirstChunk([string] $title, [string[]] $firstChunkRatingKeys) {
+    if ($firstChunkRatingKeys.Count -lt 1) {
+        throw "Cannot create playlist '$title' with zero items."
     }
 
-    # Create playlist WITH ITEMS (uri is required on many PMS versions)
-    $tEnc = UrlEncode $title
-    $rkList = ($ratingKeys -join ",")
+    $titleEnc = UrlEncode $title
+    $uriEnc = UrlEncode (Get-UriForRatingKeys $firstChunkRatingKeys)
 
-    # NOTE: uri format must be:
-    # server://{machineId}/com.plexapp.plugins.library/library/metadata/{rk1,rk2,...}
-    $uri = "server://$MachineIdentifier/com.plexapp.plugins.library/library/metadata/$rkList"
-    $uriEnc = UrlEncode $uri
-
-    $createPath = "/playlists?type=audio&smart=0&title=$tEnc&uri=$uriEnc"
-    $createResp = Invoke-PlexJsonPost $createPath
+    $createPath = "/playlists?type=audio&smart=0&title=$titleEnc&uri=$uriEnc"
+    $createResp = Invoke-Plex POST $createPath
 
     $plist = $createResp.MediaContainer.Metadata
     if ($null -eq $plist -or $plist.Count -eq 0) {
@@ -180,22 +170,53 @@ function Ensure-PlaylistFromRatingKeys([string] $title, [string[]] $ratingKeys) 
 
     $playlistId = $plist[0].ratingKey
     if ([string]::IsNullOrWhiteSpace($playlistId)) {
-        throw "Could not read playlistId/ratingKey after creating '$title'."
+        throw "Could not read playlistId after creating '$title'."
     }
 
     return $playlistId
 }
 
-# --- Main ---
-# Normalize base URL (no trailing slash)
+function Add-PlaylistItemsChunk([string] $playlistId, [string[]] $chunkRatingKeys) {
+    if ($chunkRatingKeys.Count -lt 1) { return }
+
+    $uriEnc = UrlEncode (Get-UriForRatingKeys $chunkRatingKeys)
+
+    # Plex servers differ; try the most common, then fallback.
+    $pathsToTry = @(
+        "/playlists/$playlistId?uri=$uriEnc",
+        "/playlists/$playlistId/items?uri=$uriEnc"
+    )
+
+    $lastError = $null
+    foreach ($p in $pathsToTry) {
+        try {
+            [void](Invoke-Plex PUT $p)
+            return
+        }
+        catch {
+            $lastError = $_
+        }
+    }
+
+    throw $lastError
+}
+
+function Split-IntoChunks([string[]] $arr, [int] $size) {
+    if ($size -lt 1) { throw "ChunkSize must be >= 1." }
+    for ($i = 0; $i -lt $arr.Count; $i += $size) {
+        $take = [Math]::Min($size, $arr.Count - $i)
+        ,($arr[$i..($i + $take - 1)])
+    }
+}
+
+# ----- Main -----
 $PlexBaseUrl = $PlexBaseUrl.TrimEnd('/')
 
-# Build mapping once
 $fileToRk = Build-FilePathToRatingKeyMap
 
 foreach ($m3u in $M3UPaths) {
     $title = [System.IO.Path]::GetFileNameWithoutExtension($m3u)
-    Write-Host "Processing: $m3u  => Playlist '$title'" -ForegroundColor Green
+    Write-Host "Processing $m3u -> Plex playlist '$title'" -ForegroundColor Green
 
     $trackFiles = Read-M3UTracks $m3u
 
@@ -211,14 +232,24 @@ foreach ($m3u in $M3UPaths) {
     }
 
     if ($missing.Count -gt 0) {
-        Write-Warning ("{0} tracks from '{1}' were not found in Plex section {2}. Showing first 20:" -f $missing.Count, $m3u, $SectionId)
+        Write-Warning ("{0} tracks were not found in Plex (showing first 20):" -f $missing.Count)
         $missing | Select-Object -First 20 | ForEach-Object { Write-Warning "  MISSING: $_" }
-        Write-Warning "Fix the paths (must match Plex's Part.file exactly) and re-run."
+        Write-Warning "Skipping '$title'. Fix missing paths (must match Plex's Part.file exactly) and re-run."
         continue
     }
 
-    $playlistId = Ensure-PlaylistFromRatingKeys -title $title -ratingKeys $ratingKeysOrdered.ToArray()
-    Write-Host "Created playlist '$title' (id=$playlistId) with $($ratingKeysOrdered.Count) tracks." -ForegroundColor Cyan
+    $all = $ratingKeysOrdered.ToArray()
+    $chunks = @(Split-IntoChunks $all $ChunkSize)
+
+    Write-Host ("Creating playlist with first chunk ({0} tracks)..." -f $chunks[0].Count) -ForegroundColor Cyan
+    $playlistId = New-PlexPlaylistWithFirstChunk -title $title -firstChunkRatingKeys $chunks[0]
+
+    for ($c = 1; $c -lt $chunks.Count; $c++) {
+        Write-Host ("Appending chunk {0}/{1} ({2} tracks)..." -f ($c+1), $chunks.Count, $chunks[$c].Count) -ForegroundColor DarkCyan
+        Add-PlaylistItemsChunk -playlistId $playlistId -chunkRatingKeys $chunks[$c]
+    }
+
+    Write-Host ("Created '$title' (id=$playlistId) with {0} tracks." -f $all.Length) -ForegroundColor Cyan
 }
 
 Write-Host "Done." -ForegroundColor Green
