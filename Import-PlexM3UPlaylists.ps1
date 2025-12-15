@@ -16,6 +16,8 @@ To get the section id, run https://<base-url>/library/sections?X-Plex-Token=<tok
 
 Sample:
 .\Import-PlexM3UPlaylists.ps1 -PlexBaseUrl https://192-168-1-45.<idvalue>.plex.direct:32400 -PlexToken <token> -MachineIdentifier <machineid> -SectionId <key> -M3UPaths @("X:\Holiday\Playlists\ChristmasCurated_Short2.m3u", "X:\Holiday\Playlists\ChristmasCurated_Short3.m3u")
+
+NOTE: If you are going to use curl to capture the content to be used later with -MediaContainerFile, be sure to include 'Accept: application/json' in the header to get JSON output.
 #>
 
 param(
@@ -36,6 +38,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string] $MediaContainerFile,     # optional path to load cached Plex MediaContainer XML responses
+
+    [Parameter(Mandatory = $false)]
+    [string[]] $DebugGrep,     # optional matching strings to limit verbose debug output to
 
     [int] $LibraryPageSize = 5000,    # paging size when enumerating tracks
     [int] $ChunkSize = 200,           # playlist append chunk size (tune as desired)
@@ -116,7 +121,7 @@ function Read-M3UTracks([string] $m3uPath)
 function Build-FilePathToRatingKeyMap
 {
     param(
-        [string] $MediaContainerFile
+        [string] $MediaContainerFile, [string[]] $DebugGrep
     )
 
     Write-Host "Building Plex file->ratingKey map from section $SectionId ..." -ForegroundColor Cyan
@@ -124,7 +129,6 @@ function Build-FilePathToRatingKeyMap
     $map = @{}
     $start = 0
     $total = $null
-    $allResponses = @()
 
     # Query Plex directly
     while ($true)
@@ -171,6 +175,10 @@ function Build-FilePathToRatingKeyMap
                         foreach ($p in $m.Part)
                         {
                             $file = $p.file
+                            if (-not $DebugGrep -or ($DebugGrep | Where-Object { $file -like "*$_*" }))
+                            {
+                                Write-Host ("Mapping file '{0}' to ratingKey {1}" -f $file, $rk) -ForegroundColor DarkGray
+                            }
                             if (![string]::IsNullOrWhiteSpace($file) -and -not $map.ContainsKey($file))
                             {
                                 $map[$file] = [string]$rk
@@ -279,7 +287,7 @@ function Split-IntoChunks([string[]] $arr, [int] $size)
 # ----- Main -----
 $PlexBaseUrl = $PlexBaseUrl.TrimEnd('/')
 
-$fileToRk = Build-FilePathToRatingKeyMap -MediaContainerFile $MediaContainerFile
+$fileToRk = Build-FilePathToRatingKeyMap -MediaContainerFile $MediaContainerFile -DebugGrep $DebugGrep
 
 foreach ($m3u in $M3UPaths)
 {
