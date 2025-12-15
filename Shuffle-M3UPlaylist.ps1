@@ -39,16 +39,16 @@ Random seed for reproducible shuffles. If not specified, uses a random seed.
 #>
 
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string] $InputM3U,
 
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [string] $OutputM3U,
 
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [int] $MinimumDistance = 5,
 
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [int] $Seed
 )
 
@@ -56,28 +56,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # Set random seed if provided
-if ($PSBoundParameters.ContainsKey('Seed')) {
+if ($PSBoundParameters.ContainsKey('Seed'))
+{
     Get-Random -SetSeed $Seed
 }
 
-function Read-M3UFile {
+function Read-M3UFile
+{
     param([string] $Path)
     
-    if (!(Test-Path -LiteralPath $Path)) {
+    if (!(Test-Path -LiteralPath $Path))
+    {
         throw "M3U file not found: $Path"
     }
 
     $lines = Get-Content -LiteralPath $Path -Encoding UTF8
     $tracks = @()
     
-    foreach ($line in $lines) {
+    foreach ($line in $lines)
+    {
         $trimmed = $line.Trim()
         if ($trimmed.Length -eq 0) { continue }
         if ($trimmed.StartsWith('#')) { continue }
         $tracks += $trimmed
     }
 
-    if ($tracks.Count -eq 0) {
+    if ($tracks.Count -eq 0)
+    {
         throw "No tracks found in M3U file: $Path"
     }
 
@@ -85,7 +90,8 @@ function Read-M3UFile {
     return $tracks
 }
 
-function Get-PathContext {
+function Get-PathContext
+{
     param([string] $FilePath)
     
     # Extract potential artist and album names from the directory structure
@@ -95,32 +101,36 @@ function Get-PathContext {
     
     # Get the last 2-3 directory levels (might contain artist, album, compilation info)
     $context = @{
-        Artist = $null
-        Album = $null
+        Artist   = $null
+        Album    = $null
         Keywords = @()
     }
     
-    if ($pathParts.Count -ge 1) {
+    if ($pathParts.Count -ge 1)
+    {
         $lastDir = $pathParts[-1]
         $context.Album = $lastDir
         $context.Keywords += $lastDir
     }
     
-    if ($pathParts.Count -ge 2) {
+    if ($pathParts.Count -ge 2)
+    {
         $secondLastDir = $pathParts[-2]
         $context.Artist = $secondLastDir
         $context.Keywords += $secondLastDir
     }
     
     # Also add parent directory if it looks relevant
-    if ($pathParts.Count -ge 3) {
+    if ($pathParts.Count -ge 3)
+    {
         $context.Keywords += $pathParts[-3]
     }
     
     return $context
 }
 
-function Get-NormalizedSongTitle {
+function Get-NormalizedSongTitle
+{
     param([string] $FilePath)
     
     # Extract filename without extension
@@ -142,7 +152,8 @@ function Get-NormalizedSongTitle {
     # Split by " - " and try to identify which part is the song title
     $parts = $normalized -split '\s+-\s+'
     
-    if ($parts.Count -gt 1) {
+    if ($parts.Count -gt 1)
+    {
         # Common patterns:
         # - "Artist - Song" -> use last part
         # - "Artist - Album - Song" -> use last part  
@@ -154,43 +165,52 @@ function Get-NormalizedSongTitle {
         $candidateParts = @()
         $candidateIndices = @()
         
-        for ($i = 0; $i -lt $parts.Count; $i++) {
+        for ($i = 0; $i -lt $parts.Count; $i++)
+        {
             $part = $parts[$i].Trim()
             $isContext = $false
             
             # Skip empty parts
-            if ([string]::IsNullOrWhiteSpace($part)) {
+            if ([string]::IsNullOrWhiteSpace($part))
+            {
                 continue
             }
             
             # Skip parts that are just numbers (track numbers, years, etc.)
-            if ($part -match '^\d+$') {
+            if ($part -match '^\d+$')
+            {
                 continue
             }
             
             # Skip very short parts (likely not song titles)
-            if ($part.Length -lt 2) {
+            if ($part.Length -lt 2)
+            {
                 continue
             }
             
             # Skip parts that look like album disc references
-            if ($part -match '(?i)(disc|cd)\s*\d+') {
+            if ($part -match '(?i)(disc|cd)\s*\d+')
+            {
                 continue
             }
             
             # Check if this part matches path context
-            foreach ($keyword in $pathContext.Keywords) {
-                if (![string]::IsNullOrWhiteSpace($keyword)) {
+            foreach ($keyword in $pathContext.Keywords)
+            {
+                if (![string]::IsNullOrWhiteSpace($keyword))
+                {
                     # Check if this part matches the path context (case-insensitive, allowing for variations)
                     # Match if the part contains the keyword or vice versa
-                    if ($part -match "(?i)$([regex]::Escape($keyword))" -or $keyword -match "(?i)$([regex]::Escape($part))") {
+                    if ($part -match "(?i)$([regex]::Escape($keyword))" -or $keyword -match "(?i)$([regex]::Escape($part))")
+                    {
                         $isContext = $true
                         break
                     }
                 }
             }
             
-            if (-not $isContext) {
+            if (-not $isContext)
+            {
                 $candidateParts += $part
                 $candidateIndices += $i
             }
@@ -202,10 +222,14 @@ function Get-NormalizedSongTitle {
         # - ["Song", "Artist"] -> use first (Song) 
         # - ["Song"] -> use it
         # - ["Track", "Song", "Artist"] -> prefer middle (Song)
-        if ($candidateParts.Count -gt 0) {
-            if ($candidateParts.Count -eq 1) {
+        if ($candidateParts.Count -gt 0)
+        {
+            if ($candidateParts.Count -eq 1)
+            {
                 $normalized = $candidateParts[0]
-            } elseif ($candidateParts.Count -eq 2) {
+            }
+            elseif ($candidateParts.Count -eq 2)
+            {
                 # With 2 candidates, use heuristics:
                 # - Prefer the part that looks more like a song title
                 # - Song titles often have: "The", "A", "An", common words, are longer
@@ -214,26 +238,34 @@ function Get-NormalizedSongTitle {
                 $lastPart = $candidateParts[1]
                 
                 # Heuristic: If first part starts with common song title words, prefer it
-                if ($firstPart -match '^(the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa)\s+') {
+                if ($firstPart -match '^(the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa)\s+')
+                {
                     $normalized = $firstPart
                 }
                 # Heuristic: If last part starts with common song title words, prefer it  
-                elseif ($lastPart -match '^(the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa|run|walking)\s+') {
+                elseif ($lastPart -match '^(the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa|run|walking)\s+')
+                {
                     $normalized = $lastPart
                 }
                 # Default: prefer last part (most common pattern: "Artist - Song")
-                else {
+                else
+                {
                     $normalized = $lastPart
                 }
-            } else {
+            }
+            else
+            {
                 # With 3+ candidates, prefer the middle one (typically the song title)
                 $middleIndex = [Math]::Floor(($candidateParts.Count - 1) / 2.0)
-                if ($middleIndex -ge $candidateParts.Count) {
+                if ($middleIndex -ge $candidateParts.Count)
+                {
                     $middleIndex = $candidateParts.Count - 1
                 }
                 $normalized = $candidateParts[$middleIndex]
             }
-        } else {
+        }
+        else
+        {
             # No non-context parts found, use the last part
             $normalized = $parts[-1]
         }
@@ -257,22 +289,25 @@ function Get-NormalizedSongTitle {
     return $normalized.ToLower()
 }
 
-function Group-TracksBySimilarity {
+function Group-TracksBySimilarity
+{
     param([string[]] $Tracks)
     
     $groups = @{}
     $trackInfo = @()
     
-    foreach ($track in $Tracks) {
+    foreach ($track in $Tracks)
+    {
         $normalized = Get-NormalizedSongTitle $track
         
-        if (!$groups.ContainsKey($normalized)) {
+        if (!$groups.ContainsKey($normalized))
+        {
             $groups[$normalized] = @()
         }
         $groups[$normalized] += $track
         
         $trackInfo += [PSCustomObject]@{
-            Path = $track
+            Path            = $track
             NormalizedTitle = $normalized
         }
     }
@@ -280,29 +315,35 @@ function Group-TracksBySimilarity {
     # Report duplicates/variants
     $variantGroups = $groups.GetEnumerator() | Where-Object { $_.Value.Count -gt 1 } | Sort-Object { $_.Value.Count } -Descending
     
-    if ($variantGroups) {
+    if ($variantGroups)
+    {
         Write-Host "`nFound $($variantGroups.Count) songs with multiple versions:" -ForegroundColor Yellow
         $displayCount = [Math]::Min(500, $variantGroups.Count)
-        foreach ($group in ($variantGroups | Select-Object -First $displayCount)) {
+        foreach ($group in ($variantGroups | Select-Object -First $displayCount))
+        {
             Write-Host "  '$($group.Key)' - $($group.Value.Count) versions" -ForegroundColor DarkYellow
             # Show a few examples of the actual filenames for the top groups
-            if ($group.Value.Count -gt 1) {
+            if ($group.Value.Count -gt 1)
+            {
                 $exampleCount = [Math]::Min(3, $group.Value.Count)
-                for ($i = 0; $i -lt $exampleCount; $i++) {
+                for ($i = 0; $i -lt $exampleCount; $i++)
+                {
                     $exampleFile = [System.IO.Path]::GetFileName($group.Value[$i])
                     Write-Host "    e.g.: $exampleFile" -ForegroundColor DarkGray
                 }
             }
         }
-        if ($variantGroups.Count -gt 20) {
+        if ($variantGroups.Count -gt 20)
+        {
             Write-Host "  ... and $($variantGroups.Count - 20) more" -ForegroundColor DarkGray
         }
     }
     
-    return ,$trackInfo
+    return , $trackInfo
 }
 
-function Invoke-SmartShuffle {
+function Invoke-SmartShuffle
+{
     param(
         [PSCustomObject[]] $TrackInfo,
         [int] $MinDistance
@@ -323,7 +364,8 @@ function Invoke-SmartShuffle {
     $attempts = 0
     $maxAttemptsPerTrack = 100
     
-    while ($available.Count -gt 0) {
+    while ($available.Count -gt 0)
+    {
         $placed = $false
         $attempts++
         
@@ -332,18 +374,22 @@ function Invoke-SmartShuffle {
         $availableArray = $availableArray | Sort-Object { Get-Random }
         
         # Try to find a track that respects the minimum distance
-        foreach ($track in $availableArray) {
+        foreach ($track in $availableArray)
+        {
             $canPlace = $true
             
             # Check if this normalized title was used recently
-            if ($lastUsed.ContainsKey($track.NormalizedTitle)) {
+            if ($lastUsed.ContainsKey($track.NormalizedTitle))
+            {
                 $distance = $shuffled.Count - $lastUsed[$track.NormalizedTitle]
-                if ($distance -lt $MinDistance) {
+                if ($distance -lt $MinDistance)
+                {
                     $canPlace = $false
                 }
             }
             
-            if ($canPlace) {
+            if ($canPlace)
+            {
                 # Place this track
                 [void]$shuffled.Add($track)
                 $lastUsed[$track.NormalizedTitle] = $shuffled.Count - 1
@@ -355,8 +401,10 @@ function Invoke-SmartShuffle {
         }
         
         # If we couldn't place any track, relax the constraint temporarily
-        if (!$placed) {
-            if ($attempts -gt $maxAttemptsPerTrack) {
+        if (!$placed)
+        {
+            if ($attempts -gt $maxAttemptsPerTrack)
+            {
                 Write-Warning "Could not maintain minimum distance for all songs. Placing next available track."
                 $track = $available[0]
                 [void]$shuffled.Add($track)
@@ -369,10 +417,11 @@ function Invoke-SmartShuffle {
     
     Write-Host "Shuffle complete. Generated playlist with $($shuffled.Count) tracks." -ForegroundColor Green
     # Use comma operator to prevent array unrolling
-    return ,$shuffled
+    return , $shuffled
 }
 
-function Test-ShuffleQuality {
+function Test-ShuffleQuality
+{
     param(
         [array] $ShuffledTracks,
         [int] $MinDistance
@@ -383,17 +432,21 @@ function Test-ShuffleQuality {
     $violations = 0
     $minDistanceFound = [int]::MaxValue
     
-    for ($i = 0; $i -lt $ShuffledTracks.Count; $i++) {
+    for ($i = 0; $i -lt $ShuffledTracks.Count; $i++)
+    {
         $currentTrack = $ShuffledTracks[$i]
         $currentTitle = $currentTrack.NormalizedTitle
         
         # Look ahead for the same normalized title
-        for ($j = $i + 1; $j -lt [Math]::Min($i + $MinDistance, $ShuffledTracks.Count); $j++) {
+        for ($j = $i + 1; $j -lt [Math]::Min($i + $MinDistance, $ShuffledTracks.Count); $j++)
+        {
             $compareTrack = $ShuffledTracks[$j]
-            if ($compareTrack.NormalizedTitle -eq $currentTitle) {
+            if ($compareTrack.NormalizedTitle -eq $currentTitle)
+            {
                 $distance = $j - $i
                 $violations++
-                if ($distance -lt $minDistanceFound) {
+                if ($distance -lt $minDistanceFound)
+                {
                     $minDistanceFound = $distance
                 }
                 Write-Warning "Similar songs at positions $($i+1) and $($j+1) (distance: $distance) - '$currentTitle'"
@@ -401,15 +454,19 @@ function Test-ShuffleQuality {
         }
     }
     
-    if ($violations -eq 0) {
+    if ($violations -eq 0)
+    {
         Write-Host "Perfect shuffle! No similar songs within $MinDistance tracks of each other." -ForegroundColor Green
-    } else {
+    }
+    else
+    {
         Write-Host "Found $violations constraint violation(s). Minimum distance found: $minDistanceFound" -ForegroundColor Yellow
         Write-Host "Consider reducing -MinimumDistance or running again for a different random shuffle." -ForegroundColor Yellow
     }
 }
 
-function Write-M3UFile {
+function Write-M3UFile
+{
     param(
         [string] $Path,
         [array] $ShuffledTracks
@@ -418,13 +475,15 @@ function Write-M3UFile {
     $lines = @()
     $lines += "#EXTM3U"
     
-    foreach ($track in $ShuffledTracks) {
+    foreach ($track in $ShuffledTracks)
+    {
         $lines += $track.Path
     }
     
     # Ensure directory exists
     $dir = [System.IO.Path]::GetDirectoryName($Path)
-    if ($dir -and !(Test-Path -LiteralPath $dir)) {
+    if ($dir -and !(Test-Path -LiteralPath $dir))
+    {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
     
@@ -438,13 +497,17 @@ Write-Host "=== M3U Playlist Smart Shuffler ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Determine output path
-if ([string]::IsNullOrWhiteSpace($OutputM3U)) {
+if ([string]::IsNullOrWhiteSpace($OutputM3U))
+{
     $dir = [System.IO.Path]::GetDirectoryName($InputM3U)
     $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($InputM3U)
     $ext = [System.IO.Path]::GetExtension($InputM3U)
-    if ([string]::IsNullOrWhiteSpace($dir)) {
+    if ([string]::IsNullOrWhiteSpace($dir))
+    {
         $OutputM3U = "${nameWithoutExt}_shuffled${ext}"
-    } else {
+    }
+    else
+    {
         $OutputM3U = Join-Path $dir "${nameWithoutExt}_shuffled${ext}"
     }
 }
