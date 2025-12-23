@@ -23,6 +23,11 @@ Path to the input CSV playlist file.
 Path to save the shuffled M3U playlist. If not specified, defaults to the input filename
 with "_shuffled.m3u" appended.
 
+.PARAMETER TargetSongCount
+Target number of songs in the output playlist. If specified and less than the total tracks,
+only this many tracks will be randomly selected before shuffling. If not specified, all tracks
+from the input CSV will be included.
+
 .PARAMETER MinimumDistance
 Minimum number of songs that should appear between different versions of the same song.
 Default is 5. Higher values spread similar songs further apart.
@@ -37,7 +42,7 @@ Random seed for reproducible shuffles. If not specified, uses a random seed.
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv" -OutputM3U "X:\Holiday\Playlists\Christmas_Shuffled.m3u" -MinimumDistance 8
 
 .EXAMPLE
-.\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -Seed 42
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -TargetSongCount 100 -Seed 42
 #>
 
 param(
@@ -46,6 +51,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [string] $OutputM3U,
+
+    [Parameter(Mandatory = $true)]
+    [int] $TargetSongCount,
 
     [Parameter(Mandatory = $false)]
     [string[]] $GrepGroup,
@@ -90,8 +98,8 @@ function Read-CSVFile
         {
             $tracks += [PSCustomObject]@{
                 Filename = $row.Filename
-                Weight = $row.Weight
-                Missing = $row.Missing
+                Weight   = $row.Weight
+                Missing  = $row.Missing
             }
         }
     }
@@ -165,9 +173,27 @@ function Get-PathContext
     return $context
 }
 
+function partMatchesNotSongPattern
+{
+    param([string] $part)
+
+    $matchValuesNotSong = '^(stevie|jose)\s+'
+    if ($part -match $matchValuesNotSong)
+    {
+        return $true
+    }
+
+    return $false
+}
+
 function partMatchesSongPattern
 {
     param([string] $part)
+
+    if (partMatchesNotSongPattern $part)
+    {
+        return $false
+    }
 
     # Common song starting words that indicate it's likely a song title
     $matchValues = '^(if|my|let''s|the|a|an|my|your|i|we|let|don''t|it''s|you''re|all|happy|merry|jingle|deck|winter|white|blue|silent|holy|little|santa|christmas|feliz|merry|las)\s+'
@@ -189,7 +215,7 @@ function shouldChoosePart
     }
 
     # if we are longer than the other part, AND the other part is not a common song starting word, prefer this part
-    if ($part.Length -gt $partOther.Length -and -not (partMatchesSongPattern $partOther))
+    if ($part.Length -gt $partOther.Length -and -not (partMatchesSongPattern $partOther) -and -not (partMatchesNotSongPattern $part))
     {
         return $true
     }
@@ -217,11 +243,29 @@ function chooseWinnerFromTwoParts
         return $lastPart
     }
     # Default: prefer last part (most common pattern: "Artist - Song")
+    elseif ((partMatchesNotSongPattern $firstPart) -and -not (partMatchesNotSongPattern $lastPart))
+    {
+        if ($debugThis)
+        {
+            Write-Host "      Choosing not not song from parts $($firstPart)/$($lastPart): chose $($lastPart)"
+        }
+        return $lastPart
+
+    }
+    elseif ((partMatchesNotSongPattern $lastPart) -and -not (partMatchesNotSongPattern $firstPart))
+    {
+        if ($debugThis)
+        {
+            Write-Host "      Choosing not not song from parts $($firstPart)/$($lastPart): chose $($firstPart)"
+        }
+        return $firstPart
+
+    }
     else
     {
         if ($debugThis)
         {
-            Write-Host "      Choosing between parts $($firstPart)/$($lastPart): chose by default $($lastPart)"
+            Write-Host "      Choosing between parts $($firstPart)/$($lastPart): chose by default $($firstPart)"
         }
         return $lastPart
     }
@@ -512,6 +556,8 @@ function Group-TracksBySimilarity
     {
         $normalized = Get-NormalizedSongTitle $track $groupsPass1 $DebugParts
         
+        Write-Verbose "Normalized: $track to $normalized"
+
         if (!$groups.ContainsKey($normalized))
         {
             $groups[$normalized] = @()
@@ -562,18 +608,30 @@ function Group-TracksBySimilarity
     return , $trackInfo
 }
 
+function CanPlaceTrack
+{
+    param([PSCustomObject] $Track, [hashtable] $LastUsed, [int]$CurrentTargetIndex, [int] $MinDistance)
+    # Check if this normalized title was used recently
+    if ($LastUsed.ContainsKey($Track.NormalizedTitle))
+    {
+        $distance = $CurrentTargetIndex - $LastUsed[$Track.NormalizedTitle]
+        if ($distance -lt $MinDistance)
+        {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 function Invoke-SmartShuffle
 {
     param(
         [PSCustomObject[]] $TrackInfo,
-        [int] $MinDistance
+        [int] $MinDistance,
+        [int] $TargetCount
     )
-    
-    Write-Host "`nShuffling with minimum distance of $MinDistance between similar songs..." -ForegroundColor Cyan
-    
-    # Create a list of available tracks (not yet placed)
-    $available = New-Object System.Collections.Generic.List[PSCustomObject]
-    $available.AddRange($TrackInfo)
+    Write-Host "`nShuffling $TargetCount songs with minimum distance of $MinDistance between similar songs..." -ForegroundColor Cyan
     
     # Result list
     $shuffled = New-Object System.Collections.Generic.List[PSCustomObject]
@@ -583,55 +641,35 @@ function Invoke-SmartShuffle
     
     $attempts = 0
     $maxAttemptsPerTrack = 100
-    
-    while ($available.Count -gt 0)
+    $virtualTrackCount = $TrackInfo.Count
+
+    while ($TargetCount -gt 0)
     {
-        $placed = $false
+        Write-Verbose "Tracks left to place: $TargetCount"
         $attempts++
         
         # Shuffle the available list to randomize selection
-        $availableArray = $available.ToArray()
-        $availableArray = $availableArray | Sort-Object { Get-Random }
-        
+        $nextVirtualIndex = Get-Random -Maximum $virtualTrackCount
+
+        # get the real index from that index
+        $nextIndex = $nextVirtualIndex
+
         # Try to find a track that respects the minimum distance
-        foreach ($track in $availableArray)
-        {
-            $canPlace = $true
-            
-            # Check if this normalized title was used recently
-            if ($lastUsed.ContainsKey($track.NormalizedTitle))
-            {
-                $distance = $shuffled.Count - $lastUsed[$track.NormalizedTitle]
-                if ($distance -lt $MinDistance)
-                {
-                    $canPlace = $false
-                }
-            }
-            
-            if ($canPlace)
-            {
-                # Place this track
-                [void]$shuffled.Add($track)
-                $lastUsed[$track.NormalizedTitle] = $shuffled.Count - 1
-                [void]$available.Remove($track)
-                $placed = $true
-                $attempts = 0
-                break
-            }
-        }
-        
-        # If we couldn't place any track, relax the constraint temporarily
-        if (!$placed)
+        $track = $TrackInfo[$nextIndex]
+        Write-Verbose "Considering track: $($track | Format-Table | Out-String)"
+        # see of we can place that track. if we can't just skip
+        if ((CanPlaceTrack -Track $track -LastUsed $lastUsed -CurrentTargetIndex $shuffled.Count -MinDistance $MinDistance) -or $attempts -gt $maxAttemptsPerTrack)
         {
             if ($attempts -gt $maxAttemptsPerTrack)
             {
-                Write-Warning "Could not maintain minimum distance for all songs. Placing next available track."
-                $track = $available[0]
-                [void]$shuffled.Add($track)
-                $lastUsed[$track.NormalizedTitle] = $shuffled.Count - 1
-                [void]$available.RemoveAt(0)
-                $attempts = 0
+                Write-Verbose "Relaxing constraints to place track: $($track.Path)"
             }
+            Write-Verbose "Placing track: $($track.Path)"
+            # Place this track
+            [void]$shuffled.Add($track)
+            $lastUsed[$track.NormalizedTitle] = $shuffled.Count - 1
+            $attempts = 0
+            --$TargetCount
         }
     }
     
@@ -737,11 +775,20 @@ $trackObjects = Read-CSVFile -Path $InputCSV
 # Extract just the filenames for processing (for now, ignore Weight and Missing)
 $tracks = @($trackObjects | ForEach-Object { $_.Filename })
 
+$targetCount = $tracks.Count
+
+# Apply TargetSongCount if specified
+if ($TargetSongCount -and $TargetSongCount -gt 0 -and $TargetSongCount -lt $tracks.Count)
+{
+    Write-Verbose "Applying TargetSongCount: $TargetSongCount"
+    $targetCount = $TargetSongCount
+}
+
 # Group tracks by similarity
 $trackInfo = Group-TracksBySimilarity -Tracks $tracks -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount
 
 # Perform smart shuffle
-$shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance
+$shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount
 
 # Test shuffle quality
 Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance
