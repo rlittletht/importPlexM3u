@@ -68,9 +68,12 @@ param(
     [int] $ShowGroupCount = 20,
 
     [Parameter(Mandatory = $false)]
-    [int] $Seed
-)
+    [int] $Seed,
 
+    [Parameter(Mandatory = $false)]
+    [string] $DistributionFile
+)
+    
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -129,6 +132,9 @@ function NormalizePart
     # - leading track numbers
     $Part = $Part -replace ' +\d+[\s\.\-]+', ''
     $Part = $Part -replace ' +\(\d+\) *', ''
+    
+    # remove leading "."
+    $Part = $Part -replace '^ *\. *', ''
 
     # - Special characters and extra whitespace
     $Part = $Part -replace '[_\-:]+', ' '
@@ -334,6 +340,7 @@ function Get-NormalizedSongTitle
                 Write-Host "      Processing part: $($part)"
             }
             $part = $part -replace '^\d+ *', ''
+            $part = $part -replace '^ *\. *', ''
 
             $isContext = $false
             
@@ -517,11 +524,13 @@ function Get-NormalizedSongTitle
             $normalized = $parts[-1]
         }
     }
+
+    $normalizedPartReturn = NormalizePart($normalized)
     if ($debugThis)
     {
-        Write-Host "       Final result!  CandidateParts: '$($candidateParts -join ', ')', chose: $($normalized)"
+        Write-Host "       Final result!  CandidateParts: '$($candidateParts -join ', ')', chose: $($normalized) normalized to $($normalizedPartReturn)"
     }
-    return NormalizePart($normalized)
+    return NormalizePart($normalizedPartReturn)
 }
 
 function Group-TracksBySimilarity
@@ -682,7 +691,8 @@ function Test-ShuffleQuality
 {
     param(
         [array] $ShuffledTracks,
-        [int] $MinDistance
+        [int] $MinDistance,
+        [string] $DistributionFile
     )
     
     Write-Host "`nAnalyzing shuffle quality..." -ForegroundColor Cyan
@@ -690,11 +700,14 @@ function Test-ShuffleQuality
     $violations = 0
     $minDistanceFound = [int]::MaxValue
     
+    $counts = @{}
+
     for ($i = 0; $i -lt $ShuffledTracks.Count; $i++)
     {
         $currentTrack = $ShuffledTracks[$i]
         $currentTitle = $currentTrack.NormalizedTitle
-        
+        $counts[$currentTitle] = if ($counts.ContainsKey($currentTitle)) { $counts[$currentTitle] + 1 } else { 1 }
+
         # Look ahead for the same normalized title
         for ($j = $i + 1; $j -lt [Math]::Min($i + $MinDistance, $ShuffledTracks.Count); $j++)
         {
@@ -720,6 +733,20 @@ function Test-ShuffleQuality
     {
         Write-Host "Found $violations constraint violation(s). Minimum distance found: $minDistanceFound" -ForegroundColor Yellow
         Write-Host "Consider reducing -MinimumDistance or running again for a different random shuffle." -ForegroundColor Yellow
+    }
+
+    # Output distribution to file if specified
+    if ($DistributionFile)
+    {
+        $lines = @()
+        $lines += "NormalizedTitle,Count,Distribution"
+
+        foreach ($key in $counts.Keys | Sort-Object)
+        {
+            $lines += """$key"", $($counts[$key]), $([Math]::Round(($counts[$key] / $ShuffledTracks.Count) * 1000, 2) / 1000)"
+            $lines | Out-File -FilePath $DistributionFile -Encoding UTF8
+        }
+        Write-Host "Saved track count distribution to: $DistributionFile" -ForegroundColor Green
     }
 }
 
@@ -778,7 +805,7 @@ $tracks = @($trackObjects | ForEach-Object { $_.Filename })
 $targetCount = $tracks.Count
 
 # Apply TargetSongCount if specified
-if ($TargetSongCount -and $TargetSongCount -gt 0 -and $TargetSongCount -lt $tracks.Count)
+if ($TargetSongCount -and $TargetSongCount -gt 0)
 {
     Write-Verbose "Applying TargetSongCount: $TargetSongCount"
     $targetCount = $TargetSongCount
@@ -791,7 +818,7 @@ $trackInfo = Group-TracksBySimilarity -Tracks $tracks -GrepGroup $GrepGroup -Deb
 $shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount
 
 # Test shuffle quality
-Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance
+Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance -DistributionFile $DistributionFile
 
 # Write output file
 Write-M3UFile -Path $OutputM3U -ShuffledTracks $shuffledTracks
