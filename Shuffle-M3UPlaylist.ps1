@@ -1,12 +1,14 @@
 <#
 .SYNOPSIS
-Shuffles an M3U playlist while keeping different versions of the same song spread apart.
+Shuffles a CSV playlist while keeping different versions of the same song spread apart.
 
 .DESCRIPTION
-This script reads an M3U playlist file and creates a shuffled version that attempts to
+This script reads a CSV playlist file and creates a shuffled version that attempts to
 avoid playing different versions of the same song close together. For example, if the
 playlist has "Jingle Bells" by 5 different artists, this script ensures they won't
 play consecutively or too close to each other.
+
+The CSV file should have columns: Filename, Weight, Missing
 
 The script:
 1. Extracts normalized song titles from filenames (removing artist info, version info, etc.)
@@ -14,12 +16,12 @@ The script:
 3. Shuffles using an algorithm that distributes similar songs throughout the playlist
 4. Saves the result as a new M3U file
 
-.PARAMETER InputM3U
-Path to the input M3U playlist file.
+.PARAMETER InputCSV
+Path to the input CSV playlist file.
 
 .PARAMETER OutputM3U
 Path to save the shuffled M3U playlist. If not specified, defaults to the input filename
-with "_shuffled" appended.
+with "_shuffled.m3u" appended.
 
 .PARAMETER MinimumDistance
 Minimum number of songs that should appear between different versions of the same song.
@@ -29,18 +31,18 @@ Default is 5. Higher values spread similar songs further apart.
 Random seed for reproducible shuffles. If not specified, uses a random seed.
 
 .EXAMPLE
-.\Shuffle-M3UPlaylist.ps1 -InputM3U "X:\Holiday\Playlists\Christmas.m3u"
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv"
 
 .EXAMPLE
-.\Shuffle-M3UPlaylist.ps1 -InputM3U "X:\Holiday\Playlists\Christmas.m3u" -OutputM3U "X:\Holiday\Playlists\Christmas_Shuffled.m3u" -MinimumDistance 8
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv" -OutputM3U "X:\Holiday\Playlists\Christmas_Shuffled.m3u" -MinimumDistance 8
 
 .EXAMPLE
-.\Shuffle-M3UPlaylist.ps1 -InputM3U "Christmas.m3u" -Seed 42
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -Seed 42
 #>
 
 param(
     [Parameter(Mandatory = $true)]
-    [string] $InputM3U,
+    [string] $InputCSV,
 
     [Parameter(Mandatory = $false)]
     [string] $OutputM3U,
@@ -70,29 +72,33 @@ if ($PSBoundParameters.ContainsKey('Seed'))
     Get-Random -SetSeed $Seed
 }
 
-function Read-M3UFile
+function Read-CSVFile
 {
     param([string] $Path)
     
     if (!(Test-Path -LiteralPath $Path))
     {
-        throw "M3U file not found: $Path"
+        throw "CSV file not found: $Path"
     }
 
-    $lines = Get-Content -LiteralPath $Path -Encoding UTF8
+    $csv = Import-Csv -LiteralPath $Path
     $tracks = @()
     
-    foreach ($line in $lines)
+    foreach ($row in $csv)
     {
-        $trimmed = $line.Trim()
-        if ($trimmed.Length -eq 0) { continue }
-        if ($trimmed.StartsWith('#')) { continue }
-        $tracks += $trimmed
+        if (![string]::IsNullOrWhiteSpace($row.Filename))
+        {
+            $tracks += [PSCustomObject]@{
+                Filename = $row.Filename
+                Weight = $row.Weight
+                Missing = $row.Missing
+            }
+        }
     }
 
     if ($tracks.Count -eq 0)
     {
-        throw "No tracks found in M3U file: $Path"
+        throw "No tracks found in CSV file: $Path"
     }
 
     Write-Host "Loaded $($tracks.Count) tracks from $Path" -ForegroundColor Cyan
@@ -256,7 +262,7 @@ function Get-NormalizedSongTitle
     
     # Parse multi-part filenames (e.g., "Artist - Album - Track - Song Title - Extra Info")
     # Split by " - " and try to identify which part is the song title
-    $parts = $normalized -split '\s+-\s+'
+    $parts = @($normalized -split '\s+-\s+')
     
     if ($debugThis)
     {
@@ -522,7 +528,7 @@ function Group-TracksBySimilarity
     #return;
 
     # Report duplicates/variants
-    $variantGroups = $groups.GetEnumerator() | Where-Object { $_.Value.Count -gt 1 } | Sort-Object { $_.Value.Count } -Descending
+    $variantGroups = @($groups.GetEnumerator() | Where-Object { $_.Value.Count -gt 1 } | Sort-Object { $_.Value.Count } -Descending)
     
     if ($variantGroups)
     {
@@ -707,27 +713,29 @@ function Write-M3UFile
 
 # ----- Main Script -----
 
-Write-Host "=== M3U Playlist Smart Shuffler ===" -ForegroundColor Cyan
+Write-Host "=== CSV Playlist Smart Shuffler ===" -ForegroundColor Cyan
 Write-Host ""
 
 # Determine output path
 if ([string]::IsNullOrWhiteSpace($OutputM3U))
 {
-    $dir = [System.IO.Path]::GetDirectoryName($InputM3U)
-    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($InputM3U)
-    $ext = [System.IO.Path]::GetExtension($InputM3U)
+    $dir = [System.IO.Path]::GetDirectoryName($InputCSV)
+    $nameWithoutExt = [System.IO.Path]::GetFileNameWithoutExtension($InputCSV)
     if ([string]::IsNullOrWhiteSpace($dir))
     {
-        $OutputM3U = "${nameWithoutExt}_shuffled${ext}"
+        $OutputM3U = "${nameWithoutExt}_shuffled.m3u"
     }
     else
     {
-        $OutputM3U = Join-Path $dir "${nameWithoutExt}_shuffled${ext}"
+        $OutputM3U = Join-Path $dir "${nameWithoutExt}_shuffled.m3u"
     }
 }
 
 # Read input file
-$tracks = Read-M3UFile -Path $InputM3U
+$trackObjects = Read-CSVFile -Path $InputCSV
+
+# Extract just the filenames for processing (for now, ignore Weight and Missing)
+$tracks = @($trackObjects | ForEach-Object { $_.Filename })
 
 # Group tracks by similarity
 $trackInfo = Group-TracksBySimilarity -Tracks $tracks -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount

@@ -253,8 +253,8 @@ function Add-PlaylistItemsChunk([string] $playlistId, [string[]] $chunkRatingKey
 
     # Plex servers differ; try the most common, then fallback.
     $pathsToTry = @(
-        "/playlists/$playlistId?uri=$uriEnc",
-        "/playlists/$playlistId/items?uri=$uriEnc"
+        "/playlists/$($playlistId)?uri=$uriEnc",
+        "/playlists/$($playlistId)/items?uri=$uriEnc"
     )
 
     $lastError = $null
