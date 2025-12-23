@@ -535,7 +535,7 @@ function Get-NormalizedSongTitle
 
 function Group-TracksBySimilarity
 {
-    param([string[]] $Tracks, [string[]] $GrepGroup, [string[]] $DebugParts, [int] $ShowGroupCount)
+    param([PSCustomObject[]] $TrackObjects, [string[]] $GrepGroup, [string[]] $DebugParts, [int] $ShowGroupCount)
     
     # first pass just collects groups for the next pass
     $groupsPass1 = @{}
@@ -544,10 +544,12 @@ function Group-TracksBySimilarity
     
     # first pass just collects groups for the next pass
     
-    Write-Host "`nBuilding similarity groups..." -ForegroundColor Cyan
+    Write-Host "`nBuilding similarity groups for $($TrackObjects.Count) tracks..." -ForegroundColor Cyan
 
-    foreach ($track in $Tracks)
+    foreach ($trackObject in $TrackObjects)
     {
+        $track = $trackObject.Filename
+
         # yes, pass in groups here -- we always want the empty hash table
         $normalized = Get-NormalizedSongTitle $track $groups $DebugParts
         
@@ -561,8 +563,10 @@ function Group-TracksBySimilarity
     # second pass builds the actual track info
     Write-Host "`nBuilding track info with gathered group information..." -ForegroundColor Cyan
 
-    foreach ($track in $Tracks)
+    foreach ($trackObject in $TrackObjects)
     {
+        $track = $trackObject.Filename
+
         $normalized = Get-NormalizedSongTitle $track $groupsPass1 $DebugParts
         
         Write-Verbose "Normalized: $track to $normalized"
@@ -576,6 +580,7 @@ function Group-TracksBySimilarity
         $trackInfo += [PSCustomObject]@{
             Path            = $track
             NormalizedTitle = $normalized
+            OriginalObject  = $trackObject
         }
     }
     
@@ -614,6 +619,7 @@ function Group-TracksBySimilarity
         }
     }
     
+    Write-Verbose "`nFinal track info: $($trackInfo | Format-Table | Out-String)"
     return , $trackInfo
 }
 
@@ -633,6 +639,91 @@ function CanPlaceTrack
     return $true
 }
 
+function BuildVirtualIndexMap
+{
+    param(
+        [PSCustomObject[]] $TrackInfo
+    )
+
+    Write-Verbose "Building virtual index map for weighted random selection from $($TrackInfo.Count) tracks..."
+    $virtualIndexMap = @()
+
+    $virtualIndexMap += 0
+    $virtualIndexNext = 0
+
+    # Build a virtual index map to allow random weighted selection
+    for ($i = 0; $i -lt $TrackInfo.Count; $i++)
+    {
+        $weight = [Math]::Max([int]$TrackInfo[$i].OriginalObject.Weight, 1)
+        $virtualIndexNext += $weight
+        $virtualIndexMap += $virtualIndexNext
+    }
+
+    return , $virtualIndexMap
+}
+
+function GetIndexFromVirtualIndex
+{
+    param(
+        [int[]] $VirtualIndexMap,
+        [int] $VirtualIndex
+    )
+
+    # Binary search to find the real index corresponding to the virtual index
+    $low = 0
+    $high = $VirtualIndexMap.Count - 1
+
+    while ($low -lt $high)
+    {
+        $mid = [Math]::Floor(($low + $high) / 2)
+        if ($VirtualIndexMap[$mid] -le $VirtualIndex)
+        {
+            # this might be our match if the next item is greater than VirtualIndex
+            $nextIndex = $mid + 1
+
+            if (($nextIndex -ge $high) -or ($VirtualIndexMap[$nextIndex] -gt $VirtualIndex))
+            {
+                return $mid
+            }
+
+            $low = $nextIndex
+        }
+        else
+        {
+            $high = $mid
+        }
+    }
+
+    return $low - 1
+}
+
+function TestIndexFromVirtualIndex
+{
+    param(
+        [int[]] $VirtualIndexMap,
+        [int] $VirtualIndex,
+        [int] $ExpectedRealIndex
+    )
+    $realIndex = GetIndexFromVirtualIndex -VirtualIndexMap $VirtualIndexMap -VirtualIndex $VirtualIndex
+    if ($realIndex -ne $ExpectedRealIndex)
+    {
+        throw "Test failed for VirtualIndex $(VirtualIndex): expected $ExpectedRealIndex, got $realIndex"
+    }
+}
+
+function DoTestsForVirtualIndexMapping
+{
+    # Example virtual index map for testing
+    $virtualIndexMap = @(0, 3, 7, 10)  # 3 items with weights 3, 4, 3
+
+    TestIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex 0 -ExpectedRealIndex 0
+    TestIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex 2 -ExpectedRealIndex 0
+    TestIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex 3 -ExpectedRealIndex 1
+    TestIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex 6 -ExpectedRealIndex 1
+    TestIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex 7 -ExpectedRealIndex 2
+    TestIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex 9 -ExpectedRealIndex 2
+}
+
 function Invoke-SmartShuffle
 {
     param(
@@ -640,7 +731,7 @@ function Invoke-SmartShuffle
         [int] $MinDistance,
         [int] $TargetCount
     )
-    Write-Host "`nShuffling $TargetCount songs with minimum distance of $MinDistance between similar songs..." -ForegroundColor Cyan
+    Write-Host "`nShuffling $TargetCount songs with minimum distance of $MinDistance between similar songs for $($TrackInfo.Count) tracks..." -ForegroundColor Cyan
     
     # Result list
     $shuffled = New-Object System.Collections.Generic.List[PSCustomObject]
@@ -648,24 +739,30 @@ function Invoke-SmartShuffle
     # Track when each normalized title was last used (index in shuffled list)
     $lastUsed = @{}
     
+    $virtualIndexMap = BuildVirtualIndexMap -TrackInfo $TrackInfo
+    Write-Verbose "Virtual index map: $($virtualIndexMap -join ', ')"
+
+    $virtualTrackCount = $virtualIndexMap[$virtualIndexMap.Count - 1]
+
+
     $attempts = 0
     $maxAttemptsPerTrack = 100
-    $virtualTrackCount = $TrackInfo.Count
 
     while ($TargetCount -gt 0)
     {
-        Write-Verbose "Tracks left to place: $TargetCount"
         $attempts++
         
         # Shuffle the available list to randomize selection
         $nextVirtualIndex = Get-Random -Maximum $virtualTrackCount
 
         # get the real index from that index
-        $nextIndex = $nextVirtualIndex
+        $nextIndex = GetIndexFromVirtualIndex -VirtualIndexMap $virtualIndexMap -VirtualIndex $nextVirtualIndex
+
+        Write-Verbose "Selected virtual index: $nextVirtualIndex, real index: $nextIndex"
 
         # Try to find a track that respects the minimum distance
         $track = $TrackInfo[$nextIndex]
-        Write-Verbose "Considering track: $($track | Format-Table | Out-String)"
+#        Write-Verbose "Considering track: $($track | Format-Table | Out-String)"
         # see of we can place that track. if we can't just skip
         if ((CanPlaceTrack -Track $track -LastUsed $lastUsed -CurrentTargetIndex $shuffled.Count -MinDistance $MinDistance) -or $attempts -gt $maxAttemptsPerTrack)
         {
@@ -673,7 +770,7 @@ function Invoke-SmartShuffle
             {
                 Write-Verbose "Relaxing constraints to place track: $($track.Path)"
             }
-            Write-Verbose "Placing track: $($track.Path)"
+#            Write-Verbose "Placing track: $($track.Path)"
             # Place this track
             [void]$shuffled.Add($track)
             $lastUsed[$track.NormalizedTitle] = $shuffled.Count - 1
@@ -741,11 +838,11 @@ function Test-ShuffleQuality
         $lines = @()
         $lines += "NormalizedTitle,Count,Distribution"
 
-        foreach ($key in $counts.Keys | Sort-Object)
+        foreach ($key in $counts.Keys)
         {
             $lines += """$key"", $($counts[$key]), $([Math]::Round(($counts[$key] / $ShuffledTracks.Count) * 1000, 2) / 1000)"
-            $lines | Out-File -FilePath $DistributionFile -Encoding UTF8
         }
+        $lines | Out-File -FilePath $DistributionFile -Encoding UTF8
         Write-Host "Saved track count distribution to: $DistributionFile" -ForegroundColor Green
     }
 }
@@ -778,6 +875,8 @@ function Write-M3UFile
 
 # ----- Main Script -----
 
+DoTestsForVirtualIndexMapping
+
 Write-Host "=== CSV Playlist Smart Shuffler ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -799,10 +898,7 @@ if ([string]::IsNullOrWhiteSpace($OutputM3U))
 # Read input file
 $trackObjects = Read-CSVFile -Path $InputCSV
 
-# Extract just the filenames for processing (for now, ignore Weight and Missing)
-$tracks = @($trackObjects | ForEach-Object { $_.Filename })
-
-$targetCount = $tracks.Count
+$targetCount = $trackObjects.Count
 
 # Apply TargetSongCount if specified
 if ($TargetSongCount -and $TargetSongCount -gt 0)
@@ -811,8 +907,11 @@ if ($TargetSongCount -and $TargetSongCount -gt 0)
     $targetCount = $TargetSongCount
 }
 
+Write-Verbose "Using target count: $targetCount with total tracks: $($trackObjects.Count)"
 # Group tracks by similarity
-$trackInfo = Group-TracksBySimilarity -Tracks $tracks -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount
+$trackInfo = Group-TracksBySimilarity -TrackObjects $trackObjects -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount
+
+Write-Verbose "Total grouped tracks: $($trackInfo.Count)"
 
 # Perform smart shuffle
 $shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount
