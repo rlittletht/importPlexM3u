@@ -35,6 +35,13 @@ Default is 5. Higher values spread similar songs further apart.
 .PARAMETER Seed
 Random seed for reproducible shuffles. If not specified, uses a random seed.
 
+.PARAMETER DistributionFile
+Path to save a CSV file containing distribution statistics about the shuffle.
+
+.PARAMETER DontWriteM3u
+Skip writing the M3U output file. Only valid when -DistributionFile is specified.
+Useful for testing distribution without generating the actual playlist file.
+
 .EXAMPLE
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv"
 
@@ -43,6 +50,9 @@ Random seed for reproducible shuffles. If not specified, uses a random seed.
 
 .EXAMPLE
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -TargetSongCount 100 -Seed 42
+
+.EXAMPLE
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -TargetSongCount 100 -DistributionFile "dist.csv" -DontWriteM3u
 #>
 
 param(
@@ -71,11 +81,20 @@ param(
     [int] $Seed,
 
     [Parameter(Mandatory = $false)]
-    [string] $DistributionFile
+    [string] $DistributionFile,
+
+    [Parameter(Mandatory = $false)]
+    [switch] $DontWriteM3u
 )
     
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Validate that DontWriteM3u is only used with DistributionFile
+if ($DontWriteM3u -and [string]::IsNullOrWhiteSpace($DistributionFile))
+{
+    throw "The -DontWriteM3u parameter can only be used when -DistributionFile is specified."
+}
 
 # Set random seed if provided
 if ($PSBoundParameters.ContainsKey('Seed'))
@@ -920,6 +939,13 @@ $shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $Minimu
 Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance -DistributionFile $DistributionFile
 
 # Write output file
-Write-M3UFile -Path $OutputM3U -ShuffledTracks $shuffledTracks
+if (-not $DontWriteM3u)
+{
+    Write-M3UFile -Path $OutputM3U -ShuffledTracks $shuffledTracks
+}
+else
+{
+    Write-Host "`nSkipping M3U file creation (DontWriteM3u specified)." -ForegroundColor Yellow
+}
 
 Write-Host "`nDone!" -ForegroundColor Green
