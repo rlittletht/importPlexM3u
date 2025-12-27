@@ -46,8 +46,19 @@ Useful for testing distribution without generating the actual playlist file.
 Skip shuffling and write tracks in their original order from the CSV file.
 When combined with -TargetSongCount, outputs the first N tracks without shuffling.
 
+.PARAMETER PathPrefix
+Optional path prefix to add to the beginning of each track path in the output M3U file.
+Useful when the CSV contains relative paths that need to be converted to absolute paths.
+
+.PARAMETER BashPaths
+Convert all path separators to forward slashes (/) in the output M3U file.
+Useful when generating playlists for Linux/Unix systems or network shares.
+
 .EXAMPLE
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv"
+
+.EXAMPLE
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "playlist.csv" -TargetSongCount 100 -PathPrefix "/share/Music" -BashPaths
 
 .EXAMPLE
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv" -OutputM3U "X:\Holiday\Playlists\Christmas_Shuffled.m3u" -MinimumDistance 8
@@ -94,7 +105,13 @@ param(
     [switch] $DontWriteM3u,
 
     [Parameter(Mandatory = $false)]
-    [switch] $PassThrough
+    [switch] $PassThrough,
+
+    [Parameter(Mandatory = $false)]
+    [string] $PathPrefix,
+
+    [Parameter(Mandatory = $false)]
+    [switch] $BashPaths
 )
     
 Set-StrictMode -Version Latest
@@ -940,7 +957,9 @@ function Write-M3UFile
 {
     param(
         [string] $Path,
-        [array] $ShuffledTracks
+        [array] $ShuffledTracks,
+        [string] $PathPrefix,
+        [switch] $BashPaths
     )
     
     $lines = @()
@@ -948,7 +967,21 @@ function Write-M3UFile
     
     foreach ($track in $ShuffledTracks)
     {
-        $lines += $track.Path
+        $trackPath = $track.Path
+        
+        # Add path prefix if provided
+        if (![string]::IsNullOrWhiteSpace($PathPrefix))
+        {
+            $trackPath = Join-Path $PathPrefix $trackPath
+        }
+        
+        # Convert to Linux/Bash paths if requested
+        if ($BashPaths)
+        {
+            $trackPath = $trackPath -replace '\\', '/'
+        }
+        
+        $lines += $trackPath
     }
     
     # Ensure directory exists
@@ -1034,7 +1067,7 @@ else
 # Write output file
 if (-not $DontWriteM3u)
 {
-    Write-M3UFile -Path $OutputM3U -ShuffledTracks $shuffledTracks
+    Write-M3UFile -Path $OutputM3U -ShuffledTracks $shuffledTracks -PathPrefix $PathPrefix -BashPaths:$BashPaths
 }
 else
 {
