@@ -8,7 +8,7 @@ avoid playing different versions of the same song close together. For example, i
 playlist has "Jingle Bells" by 5 different artists, this script ensures they won't
 play consecutively or too close to each other.
 
-The CSV file should have columns: Filename, Weight, Missing
+The CSV file should have columns: Filename, [Weight]
 
 The script:
 1. Extracts normalized song titles from filenames (removing artist info, version info, etc.)
@@ -42,6 +42,10 @@ Path to save a CSV file containing distribution statistics about the shuffle.
 Skip writing the M3U output file. Only valid when -DistributionFile is specified.
 Useful for testing distribution without generating the actual playlist file.
 
+.PARAMETER PassThrough
+Skip shuffling and write tracks in their original order from the CSV file.
+When combined with -TargetSongCount, outputs the first N tracks without shuffling.
+
 .EXAMPLE
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "X:\Holiday\Playlists\Christmas.csv"
 
@@ -53,6 +57,9 @@ Useful for testing distribution without generating the actual playlist file.
 
 .EXAMPLE
 .\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -TargetSongCount 100 -DistributionFile "dist.csv" -DontWriteM3u
+
+.EXAMPLE
+.\Shuffle-M3UPlaylist.ps1 -InputCSV "Christmas.csv" -TargetSongCount 100 -PassThrough
 #>
 
 param(
@@ -62,7 +69,7 @@ param(
     [Parameter(Mandatory = $false)]
     [string] $OutputM3U,
 
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [int] $TargetSongCount,
 
     [Parameter(Mandatory = $false)]
@@ -84,11 +91,30 @@ param(
     [string] $DistributionFile,
 
     [Parameter(Mandatory = $false)]
-    [switch] $DontWriteM3u
+    [switch] $DontWriteM3u,
+
+    [Parameter(Mandatory = $false)]
+    [switch] $PassThrough
 )
     
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Validate that PassThrough is not used with shuffle-related parameters
+if ($PassThrough)
+{
+    $invalidParams = @()
+    if ($PSBoundParameters.ContainsKey('TargetSongCount')) { $invalidParams += 'TargetSongCount' }
+    if ($PSBoundParameters.ContainsKey('MinimumDistance')) { $invalidParams += 'MinimumDistance' }
+    if ($PSBoundParameters.ContainsKey('Seed')) { $invalidParams += 'Seed' }
+    if ($PSBoundParameters.ContainsKey('DistributionFile')) { $invalidParams += 'DistributionFile' }
+    if ($DontWriteM3u) { $invalidParams += 'DontWriteM3u' }
+    
+    if ($invalidParams.Count -gt 0)
+    {
+        throw "The -PassThrough parameter cannot be used with: $($invalidParams -join ', '). These parameters are only valid for shuffled output."
+    }
+}
 
 # Validate that DontWriteM3u is only used with DistributionFile
 if ($DontWriteM3u -and [string]::IsNullOrWhiteSpace($DistributionFile))
@@ -118,10 +144,16 @@ function Read-CSVFile
     {
         if (![string]::IsNullOrWhiteSpace($row.Filename))
         {
+            # Default weight to 1 if not present or empty
+            $weight = 1
+            if ($row.PSObject.Properties.Name -contains 'Weight' -and ![string]::IsNullOrWhiteSpace($row.Weight))
+            {
+                $weight = $row.Weight
+            }
+            
             $tracks += [PSCustomObject]@{
                 Filename = $row.Filename
-                Weight   = $row.Weight
-                Missing  = $row.Missing
+                Weight   = $weight
             }
         }
     }
@@ -965,16 +997,39 @@ if ($TargetSongCount -and $TargetSongCount -gt 0)
 }
 
 Write-Verbose "Using target count: $targetCount with total tracks: $($trackObjects.Count)"
-# Group tracks by similarity
-$trackInfo = Group-TracksBySimilarity -TrackObjects $trackObjects -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount
 
-Write-Verbose "Total grouped tracks: $($trackInfo.Count)"
+if ($PassThrough)
+{
+    Write-Host "`nPass-through mode: Writing tracks in original order (no shuffling)..." -ForegroundColor Cyan
+    
+    # Create trackInfo objects without grouping
+    $trackInfo = @()
+    foreach ($trackObj in $trackObjects)
+    {
+        $trackInfo += [PSCustomObject]@{
+            Path            = $trackObj.Filename
+            NormalizedTitle = ""
+            Weight          = 0
+        }
+    }
+    
+    $shuffledTracks = $trackInfo
+    
+    Write-Host "Selected $($shuffledTracks.Count) tracks for output." -ForegroundColor Cyan
+}
+else
+{
+    # Group tracks by similarity
+    $trackInfo = Group-TracksBySimilarity -TrackObjects $trackObjects -GrepGroup $GrepGroup -DebugParts $DebugParts -ShowGroupCount $ShowGroupCount
 
-# Perform smart shuffle
-$shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount -DistributionFile $DistributionFile
+    Write-Verbose "Total grouped tracks: $($trackInfo.Count)"
 
-# Test shuffle quality
-Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance
+    # Perform smart shuffle
+    $shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount -DistributionFile $DistributionFile
+
+    # Test shuffle quality
+    Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance
+}
 
 # Write output file
 if (-not $DontWriteM3u)
