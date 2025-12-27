@@ -748,7 +748,8 @@ function Invoke-SmartShuffle
     param(
         [PSCustomObject[]] $TrackInfo,
         [int] $MinDistance,
-        [int] $TargetCount
+        [int] $TargetCount,
+        [string] $DistributionFile
     )
     Write-Host "`nShuffling $TargetCount songs with minimum distance of $MinDistance between similar songs for $($TrackInfo.Count) tracks..." -ForegroundColor Cyan
     
@@ -757,12 +758,12 @@ function Invoke-SmartShuffle
     
     # Track when each normalized title was last used (index in shuffled list)
     $lastUsed = @{}
-    
+    $frequencies = @{}
+
     $virtualIndexMap = BuildVirtualIndexMap -TrackInfo $TrackInfo
     Write-Verbose "Virtual index map: $($virtualIndexMap -join ', ')"
 
     $virtualTrackCount = $virtualIndexMap[$virtualIndexMap.Count - 1]
-
 
     $attempts = 0
     $maxAttemptsPerTrack = 100
@@ -781,7 +782,7 @@ function Invoke-SmartShuffle
 
         # Try to find a track that respects the minimum distance
         $track = $TrackInfo[$nextIndex]
-#        Write-Verbose "Considering track: $($track | Format-Table | Out-String)"
+        #        Write-Verbose "Considering track: $($track | Format-Table | Out-String)"
         # see of we can place that track. if we can't just skip
         if ((CanPlaceTrack -Track $track -LastUsed $lastUsed -CurrentTargetIndex $shuffled.Count -MinDistance $MinDistance) -or $attempts -gt $maxAttemptsPerTrack)
         {
@@ -789,16 +790,71 @@ function Invoke-SmartShuffle
             {
                 Write-Verbose "Relaxing constraints to place track: $($track.Path)"
             }
-#            Write-Verbose "Placing track: $($track.Path)"
+            #            Write-Verbose "Placing track: $($track.Path)"
             # Place this track
             [void]$shuffled.Add($track)
+            if ($frequencies.ContainsKey($track.Path))
+            {
+                $frequencies[$track.Path].Count += 1
+                $frequencies[$track.Path].Indexes += $shuffled.Count - 1
+            }
+            else
+            {
+                $frequencies[$track.Path] = [PSCustomObject]@{ 
+                    Count   = 1; 
+                    Indexes = @($shuffled.Count - 1) 
+                }
+            }
             $lastUsed[$track.NormalizedTitle] = $shuffled.Count - 1
+            # tabulate by path since path is what is weighted
             $attempts = 0
             --$TargetCount
         }
     }
-    
+
     Write-Host "Shuffle complete. Generated playlist with $($shuffled.Count) tracks." -ForegroundColor Green
+
+    # Output distribution to file if specified
+    if ($DistributionFile)
+    {
+        $lines = @()
+        $lines += "NormalizedTitle,Count,Expected,Distribution,FirstDelta,LastDelta,AverageDelta,Indexes"
+
+        foreach ($track in $TrackInfo)
+        {
+            if ($frequencies.ContainsKey($track.Path))
+            {
+                $frequency = $frequencies[$track.Path]
+                $count = $frequency.Count
+                $firstPlayDelta = if ($frequency.Indexes.Count -gt 0) { $frequency.Indexes[0] } else { -1 }
+                $lastPlayDelta = if ($frequency.Indexes.Count -gt 0) { $shuffled.Count - $frequency.Indexes[-1] } else { -1 }
+
+                $sumDeltas = 0
+                $lastIndex = 0
+                for ($i = 1; $i -lt $frequency.Indexes.Count; $i++)
+                {
+                    $index = $frequency.Indexes[$i]
+                    $sumDeltas += $frequency.Indexes[$i] - $frequency.Indexes[$i - 1]
+                }
+                $averageDelta = if ($frequency.Indexes.Count -gt 1) { $sumDeltas / ($frequency.Indexes.Count - 1) } else { -1 }
+            }
+            else
+            {
+                $count = 0
+                $firstPlayDelta = -1
+                $lastPlayDelta = -1
+                $averageDelta = -1
+            }
+            
+            $expectedDistribution = [Math]::Round((([int]$track.OriginalObject.Weight) / $virtualTrackCount) * 1000, 2) / 1000;
+            $distribution = [Math]::Round(($count / $shuffled.Count) * 1000, 2) / 1000
+            $indexes = if ($frequencies.ContainsKey($track.Path)) { $frequencies[$track.Path].Indexes -join ';' } else { '' }
+            $line = """$($track.Path)"", $count, $expectedDistribution, $distribution, $firstPlayDelta, $lastPlayDelta, $averageDelta, $indexes"
+            $lines += $line
+        }
+        $lines | Out-File -FilePath $DistributionFile -Encoding UTF8
+        Write-Host "Saved track count distribution to: $DistributionFile" -ForegroundColor Green
+    }
     # Use comma operator to prevent array unrolling
     return , $shuffled
 }
@@ -807,8 +863,7 @@ function Test-ShuffleQuality
 {
     param(
         [array] $ShuffledTracks,
-        [int] $MinDistance,
-        [string] $DistributionFile
+        [int] $MinDistance
     )
     
     Write-Host "`nAnalyzing shuffle quality..." -ForegroundColor Cyan
@@ -816,13 +871,10 @@ function Test-ShuffleQuality
     $violations = 0
     $minDistanceFound = [int]::MaxValue
     
-    $counts = @{}
-
     for ($i = 0; $i -lt $ShuffledTracks.Count; $i++)
     {
         $currentTrack = $ShuffledTracks[$i]
         $currentTitle = $currentTrack.NormalizedTitle
-        $counts[$currentTitle] = if ($counts.ContainsKey($currentTitle)) { $counts[$currentTitle] + 1 } else { 1 }
 
         # Look ahead for the same normalized title
         for ($j = $i + 1; $j -lt [Math]::Min($i + $MinDistance, $ShuffledTracks.Count); $j++)
@@ -849,20 +901,6 @@ function Test-ShuffleQuality
     {
         Write-Host "Found $violations constraint violation(s). Minimum distance found: $minDistanceFound" -ForegroundColor Yellow
         Write-Host "Consider reducing -MinimumDistance or running again for a different random shuffle." -ForegroundColor Yellow
-    }
-
-    # Output distribution to file if specified
-    if ($DistributionFile)
-    {
-        $lines = @()
-        $lines += "NormalizedTitle,Count,Distribution"
-
-        foreach ($key in $counts.Keys)
-        {
-            $lines += """$key"", $($counts[$key]), $([Math]::Round(($counts[$key] / $ShuffledTracks.Count) * 1000, 2) / 1000)"
-        }
-        $lines | Out-File -FilePath $DistributionFile -Encoding UTF8
-        Write-Host "Saved track count distribution to: $DistributionFile" -ForegroundColor Green
     }
 }
 
@@ -933,10 +971,10 @@ $trackInfo = Group-TracksBySimilarity -TrackObjects $trackObjects -GrepGroup $Gr
 Write-Verbose "Total grouped tracks: $($trackInfo.Count)"
 
 # Perform smart shuffle
-$shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount
+$shuffledTracks = Invoke-SmartShuffle -TrackInfo $trackInfo -MinDistance $MinimumDistance -TargetCount $targetCount -DistributionFile $DistributionFile
 
 # Test shuffle quality
-Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance -DistributionFile $DistributionFile
+Test-ShuffleQuality -ShuffledTracks $shuffledTracks -MinDistance $MinimumDistance
 
 # Write output file
 if (-not $DontWriteM3u)
